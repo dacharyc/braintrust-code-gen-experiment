@@ -1,0 +1,25 @@
+{
+  "name": "braintrust-code-gen-experiment",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "compare": "npm run build && export $(xargs < .env) && node dist/compare-approaches.js",
+    "build": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^25.2.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "autoevals": "^0.0.131",
+    "braintrust": "^2.2.0",
+    "mongodb": "^7.1.0",
+    "openai": "^6.18.0"
+  }
+}
