@@ -3,25 +3,23 @@
  */
 
 export interface FetchDocumentationOptions {
-  /** Maximum length of content to return (default: 8000) */
-  maxLength?: number;
   /** Whether to log progress to console (default: true) */
   verbose?: boolean;
 }
 
 /**
- * Fetch documentation content from a URL
- * Supports .md URLs which return raw markdown
- * 
+ * Fetch documentation content from a URL.
+ * Supports .md URLs which return raw markdown.
+ *
  * @param url - The URL to fetch documentation from
  * @param options - Optional configuration for fetching
- * @returns The documentation content, truncated if necessary
+ * @returns The documentation content
  */
 export async function fetchDocumentation(
   url: string,
   options: FetchDocumentationOptions = {}
 ): Promise<string> {
-  const { maxLength = 8000, verbose = true } = options;
+  const { verbose = true } = options;
 
   try {
     if (verbose) {
@@ -41,14 +39,6 @@ export async function fetchDocumentation(
       console.log(`[Docs] Fetched ${content.length} characters of documentation`);
     }
 
-    // Truncate if too long (to avoid token limits)
-    if (content.length > maxLength) {
-      if (verbose) {
-        console.log(`[Docs] Truncating from ${content.length} to ${maxLength} characters`);
-      }
-      return content.substring(0, maxLength) + "\n\n[... documentation truncated ...]";
-    }
-
     return content;
   } catch (error) {
     if (verbose) {
@@ -60,4 +50,3 @@ export async function fetchDocumentation(
     return `[Documentation could not be loaded from ${url}]`;
   }
 }
-
