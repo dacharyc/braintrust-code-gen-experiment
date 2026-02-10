@@ -18,6 +18,7 @@
 
 import { Eval } from "braintrust";
 import OpenAI from "openai";
+import { fetchDocumentation } from "./utils/fetch-documentation.js";
 import { scoreMongoDBCode } from "./scorers/mongodb-code-scorer.js";
 import { cleanupSearchIndexes } from "./utils/code-executor.js";
 
@@ -69,34 +70,6 @@ export const scoringClient = new OpenAI({
 
 /** Export scoring model for use in scorer */
 export { SCORING_MODEL };
-
-/**
- * Fetch documentation content from a URL
- * Supports .md URLs which return raw markdown
- */
-async function fetchDocumentation(url: string): Promise<string> {
-  try {
-    console.log(`[Docs] Fetching documentation from: ${url}`);
-    const response = await fetch(url);
-    if (!response.ok) {
-      console.warn(`[Docs] Failed to fetch: ${response.status} ${response.statusText}`);
-      return `[Documentation could not be loaded from ${url}]`;
-    }
-    const content = await response.text();
-    console.log(`[Docs] Fetched ${content.length} characters of documentation`);
-
-    // Truncate if too long (to avoid token limits)
-    const maxLength = 8000;
-    if (content.length > maxLength) {
-      console.log(`[Docs] Truncating from ${content.length} to ${maxLength} characters`);
-      return content.substring(0, maxLength) + "\n\n[... documentation truncated ...]";
-    }
-    return content;
-  } catch (error) {
-    console.warn(`[Docs] Error fetching documentation:`, error instanceof Error ? error.message : String(error));
-    return `[Documentation could not be loaded from ${url}]`;
-  }
-}
 
 // Evaluation data: test cases for MongoDB code generation
 // Note: Braintrust passes `input` to the task function, so we structure input as an object
