@@ -13,4 +13,16 @@
  * 2. Run: npm run compare
  */
 
-export { compareApproaches } from "./compare-approaches.js";
+// Re-export harness for use in other evaluation scripts
+export {
+  runEvaluation,
+  taskBaseline,
+  taskWithDocs,
+  taskWithSkill,
+  generationClient,
+  scoringClient,
+  GENERATION_MODEL,
+  SCORING_MODEL,
+  type TaskInput,
+  type EvaluationConfig,
+} from "./harness/index.js";
