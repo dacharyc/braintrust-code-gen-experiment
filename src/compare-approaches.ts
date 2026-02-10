@@ -19,6 +19,7 @@
 import { Eval } from "braintrust";
 import OpenAI from "openai";
 import { fetchDocumentation } from "./utils/fetch-documentation.js";
+import { readSkillFile } from "./utils/read-skill-file.js";
 import { scoreMongoDBCode } from "./scorers/mongodb-code-scorer.js";
 import { cleanupSearchIndexes } from "./utils/code-executor.js";
 
@@ -79,6 +80,7 @@ const evalData: any[] = [
     input: {
       prompt: "Write Node.js code to create a search index on the movies collection in sample_mflix with dynamic mapping",
       docLink: "https://www.mongodb.com/docs/atlas/atlas-search/manage-indexes.md",
+      skillFile: "src/skills/search.md",
     },
     expected: {
       type: "createSearchIndex",
@@ -100,30 +102,11 @@ Requirements:
 - Do NOT wrap code in markdown code blocks or backticks
 - No explanations or comments outside the code`;
 
-const MONGODB_SKILL_PROMPT = `You are a MongoDB expert assistant. Generate Node.js code using the MongoDB driver.
-
-MongoDB Atlas Search Expertise:
-- Atlas Search indexes are created with collection.createSearchIndex()
-- Index structure: { name: "indexName", definition: { mappings: {...} } }
-- Use "default" as the index name unless a specific name is requested
-- For dynamic mapping: { mappings: { dynamic: true } }
-- For specific fields: { mappings: { dynamic: false, fields: { fieldName: { type: "string" } } } }
-- Search queries use the $search aggregation stage
-- Always use process.env.MONGODB_URI for connection string
-
-Code Requirements:
-- Use CommonJS syntax (require, not import)
-- Use async/await
-- Include error handling
-- Close MongoDB connections in finally blocks
-- Return only executable code
-- Do NOT wrap code in markdown code blocks or backticks
-- No explanations or comments outside the code`;
-
 // Input type for task functions
 interface TaskInput {
   prompt: string;
   docLink: string;
+  skillFile?: string;
 }
 
 /**
@@ -185,14 +168,27 @@ ${docContent}`;
 
 /**
  * Task function with MongoDB skill/expertise
+ * Reads skill content from a file and uses it as the system prompt
  * @param hooks - Braintrust hooks for logging additional data
  */
 async function taskWithSkill(input: TaskInput, hooks?: any): Promise<string> {
   console.log(`[WithSkill] Generating code with ${GENERATION_MODEL}...`);
 
+  // Read skill content from file
+  if (!input.skillFile) {
+    throw new Error("skillFile is required for taskWithSkill");
+  }
+  const skillContent = await readSkillFile(input.skillFile);
+
+  // Build system prompt with skill content
+  const systemPrompt = `You are a MongoDB expert assistant. Generate Node.js code using the MongoDB driver.
+
+${skillContent}`;
+
   // Log the skill prompt and user prompt separately to metadata
   if (hooks) {
-    hooks.metadata.skillPrompt = MONGODB_SKILL_PROMPT;
+    hooks.metadata.skillFile = input.skillFile;
+    hooks.metadata.skillContent = skillContent;
     hooks.metadata.userPrompt = input.prompt;
     hooks.metadata.generationModel = GENERATION_MODEL;
   }
@@ -200,7 +196,7 @@ async function taskWithSkill(input: TaskInput, hooks?: any): Promise<string> {
   const response = await generationClient.chat.completions.create({
     model: GENERATION_MODEL,
     messages: [
-      { role: "system", content: MONGODB_SKILL_PROMPT },
+      { role: "system", content: systemPrompt },
       { role: "user", content: input.prompt }
     ],
     temperature: 0.2,
