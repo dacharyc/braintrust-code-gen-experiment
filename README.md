@@ -1,10 +1,10 @@
 # MongoDB Code Generation Evaluation
 
-Evaluates LLM effectiveness at generating MongoDB Atlas Search code by comparing three approaches:
+Evaluates LLM effectiveness at generating MongoDB code by comparing three approaches:
 
 1. **Baseline**: LLM with a realistic developer prompt (no extra help)
-2. **With Documentation**: Same prompt + actual documentation content fetched from URL
-3. **With Skill**: Same prompt + custom MongoDB expertise in the system prompt
+2. **With Documentation**: Same prompt + documentation content fetched from URL
+3. **With Skill**: Same prompt + domain expertise from a skill file
 
 Results are logged to [Braintrust](https://www.braintrust.dev) for tracking experiments over time.
 
@@ -14,7 +14,7 @@ Results are logged to [Braintrust](https://www.braintrust.dev) for tracking expe
 
 - Node.js v18+
 - MongoDB Atlas cluster with `sample_mflix` dataset loaded
-- Braintrust API key (used for both LLM access via AI Proxy and experiment tracking)
+- Braintrust API key (for LLM access via AI Proxy and experiment tracking)
 
 ### Installation
 
@@ -35,7 +35,7 @@ GENERATION_MODEL=gpt-4o-mini
 SCORING_MODEL=claude-sonnet-4-5-20250929
 ```
 
-**Note**: LLM calls are made through the [Braintrust AI Proxy](https://www.braintrust.dev/docs/guides/proxy), which provides unified access to multiple providers (OpenAI, Anthropic, Google, etc.) using your Braintrust API key. Configure provider API keys in your Braintrust organization settings.
+LLM calls are made through the [Braintrust AI Proxy](https://www.braintrust.dev/docs/guides/proxy), which provides unified access to multiple providers (OpenAI, Anthropic, Google, etc.) using your Braintrust API key. Configure provider API keys in your Braintrust organization settings.
 
 ## Usage
 
@@ -47,7 +47,7 @@ This runs all three evaluation approaches sequentially and logs results to Brain
 
 ### Testing Different Models
 
-You can easily test different models by setting environment variables:
+Test different models by setting environment variables:
 
 ```bash
 # Use Claude for generation
@@ -57,20 +57,28 @@ GENERATION_MODEL=claude-sonnet-4-5-20250929 npm run compare
 GENERATION_MODEL=gpt-4o SCORING_MODEL=gemini-2.5-flash npm run compare
 ```
 
-The generation and scoring models are intentionally separate to avoid self-evaluation bias in LLM-as-judge scenarios.
+The generation and scoring models are intentionally separate to avoid self-evaluation bias.
 
 ## Project Structure
 
 ```
 src/
-├── compare-approaches.ts    # Main evaluation script
-├── index.ts                 # Entry point
+├── index.ts                 # Re-exports harness components
+├── harness/
+│   └── index.ts             # Reusable evaluation infrastructure
+├── evals/
+│   └── search/
+│       └── create-search-index.ts   # Atlas Search evaluation
 ├── scorers/
-│   └── mongodb-code-scorer.ts   # Multi-dimensional scoring
+│   └── search-scorer.ts     # Atlas Search scorer
+├── skills/
+│   └── search.md            # Atlas Search expertise
 ├── utils/
-│   └── code-executor.ts         # VM execution & cleanup
+│   ├── code-executor.ts     # VM execution & cleanup
+│   ├── fetch-documentation.ts
+│   └── read-skill-file.ts
 └── examples/
-    └── reference-implementations.ts  # Reference code
+    └── reference-implementations.ts
 ```
 
 ## Scoring
@@ -80,7 +88,7 @@ Generated code is scored on four dimensions:
 | Dimension | Weight | What it measures |
 |-----------|--------|------------------|
 | Syntax | 25% | Valid JavaScript with proper imports |
-| Semantic | 35% | Correct MongoDB APIs (`createSearchIndex`, etc.) |
+| Semantic | 35% | Correct MongoDB APIs for the topic |
 | Execution | 20% | Code runs without errors |
 | Result | 20% | Produces expected output |
 
@@ -88,57 +96,126 @@ Generated code is scored on four dimensions:
 
 | Score | Interpretation |
 |-------|---------------|
-| 0.00 - 0.25 | Poor - code is broken or missing key components |
-| 0.26 - 0.50 | Fair - some correct elements but significant issues |
-| 0.51 - 0.75 | Good - mostly correct with minor issues |
-| 0.76 - 0.90 | Very Good - correct with minor improvements needed |
-| 0.91 - 1.00 | Excellent - production-ready |
+| 0-25% | Poor - code is broken or missing key components |
+| 26-50% | Fair - some correct elements but significant issues |
+| 51-75% | Good - mostly correct with minor issues |
+| 76-90% | Very Good - correct with minor improvements needed |
+| 91-100% | Excellent - production-ready |
+
+## Adding a New Evaluation
+
+### 1. Create the Evaluation File
+
+Create a new file in `src/evals/<topic>/`:
+
+```typescript
+// src/evals/aggregation/basic-pipeline.ts
+import { runEvaluation, type TaskInput } from "../../harness/index.js";
+import { aggregationScorer } from "../../scorers/aggregation-scorer.js";
+
+const evalData: Array<{ input: TaskInput; expected: any }> = [
+  {
+    input: {
+      prompt: "Write code to count documents by genre",
+      docLink: "https://www.mongodb.com/docs/manual/aggregation/",
+      skillFile: "src/skills/aggregation.md",
+    },
+    expected: {
+      type: "aggregation",
+      stages: ["$group", "$count"],
+    },
+  },
+];
+
+runEvaluation({
+  projectName: "MongoDB Aggregation",
+  evalData,
+  scorer: aggregationScorer,
+  cleanup: myCleanupFunction, // optional
+}).catch(console.error);
+```
+
+### 2. Create a Skill File (Optional)
+
+Add domain expertise in `src/skills/<topic>.md`:
+
+```markdown
+# Aggregation Best Practices
+
+- Use $match early to filter documents
+- Use $project to limit fields
+- ...
+```
+
+### 3. Add a Script to package.json
+
+```json
+{
+  "scripts": {
+    "eval:aggregation": "npm run build && export $(xargs < .env) && node dist/evals/aggregation/basic-pipeline.js"
+  }
+}
+```
+
+## Creating a New Scorer
+
+Use the `createScorer` factory from the harness:
+
+```typescript
+// src/scorers/aggregation-scorer.ts
+import { createScorer, type ValidationContext } from "../harness/index.js";
+
+async function validateAggregationSemantics(ctx: ValidationContext) {
+  const { output, expected, checks, errors } = ctx;
+  let score = 0;
+
+  if (expected.type === "aggregation") {
+    if (output.includes("aggregate")) {
+      score += 0.15;
+      checks.push("✓ Uses aggregate method");
+    }
+    // Add more semantic checks...
+  }
+
+  return { score };
+}
+
+async function validateAggregationResult(ctx: ValidationContext & { executionSucceeded: boolean }) {
+  const { expected, checks, executionSucceeded } = ctx;
+
+  if (executionSucceeded) {
+    // Verify the aggregation produced expected results
+    return { score: 0.2 };
+  }
+
+  return { score: 0 };
+}
+
+export const aggregationScorer = createScorer({
+  name: "aggregation_scorer",
+  validateSemantics: validateAggregationSemantics,
+  validateResult: validateAggregationResult,
+});
+```
+
+The `createScorer` factory handles:
+- **Syntax validation** (25%): Checks for async/await, MongoDB imports
+- **Execution** (20%): Runs the code in a VM sandbox
+
+Your scorer provides:
+- **Semantic validation** (35%): Topic-specific API checks
+- **Result validation** (20%): Verify expected outcomes
 
 ## Limitations
 
 ### Sequential Execution
 
-Evaluations run sequentially (not in parallel) because:
+Evaluations run sequentially because:
 
 - MongoDB Atlas Search indexes are created during code execution
 - Indexes must be cleaned up between test runs
 - M0 (free tier) Atlas clusters support a maximum of 3 search indexes
 
-This means evaluation time scales linearly with the number of test cases.
-
 ### Atlas Search Index Timing
 
-Atlas Search indexes take time to become available after creation. The scorer handles this with polling and cleanup, but it adds latency to each test case.
-
-## Adding Test Cases
-
-Edit `evalData` in `src/compare-approaches.ts`:
-
-```typescript
-const evalData = [
-  {
-    input: {
-      prompt: "Your prompt here",
-      docLink: "https://www.mongodb.com/docs/atlas/atlas-search/...",
-    },
-    expected: {
-      type: "createSearchIndex",
-      database: "sample_mflix",
-      collection: "movies",
-      // ... expected properties
-    },
-  },
-];
-```
-
-Note: The `input` object is passed to the task function by Braintrust. The `prompt` and `docLink` fields are accessed as `input.prompt` and `input.docLink` within the task functions.
-
-## Customizing Prompts
-
-The system prompts are defined in `src/compare-approaches.ts`:
-
-- `BASELINE_SYSTEM_PROMPT`: Generic coding assistant
-- `MONGODB_SKILL_PROMPT`: MongoDB expert with Atlas Search knowledge
-
-Modify these to test different prompt strategies.
-
+Atlas Search indexes take time to become available after creation. The scorer handles this with polling and cleanup, but it adds latency to each test case
