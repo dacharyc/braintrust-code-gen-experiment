@@ -7,9 +7,9 @@
  * Usage: npm run compare
  */
 
-import { runEvaluation, type TaskInput } from "./harness/index.js";
-import { scoreMongoDBCode } from "./scorers/mongodb-code-scorer.js";
-import { cleanupSearchIndexes } from "./utils/code-executor.js";
+import { runEvaluation, type TaskInput } from "../../harness/index.js";
+import { searchScorer } from "../../scorers/search-scorer.js";
+import { cleanupSearchIndexes } from "../../utils/code-executor.js";
 
 // Test cases for MongoDB Atlas Search code generation
 const evalData: Array<{ input: TaskInput; expected: any }> = [
@@ -33,6 +33,6 @@ const evalData: Array<{ input: TaskInput; expected: any }> = [
 runEvaluation({
   projectName: "MongoDB Atlas Search",
   evalData,
-  scorer: scoreMongoDBCode,
+  scorer: searchScorer,
   cleanup: cleanupSearchIndexes,
 }).catch(console.error);

@@ -16,6 +16,7 @@
 // Re-export harness for use in other evaluation scripts
 export {
   runEvaluation,
+  createScorer,
   taskBaseline,
   taskWithDocs,
   taskWithSkill,
@@ -25,4 +26,9 @@ export {
   SCORING_MODEL,
   type TaskInput,
   type EvaluationConfig,
+  type CodeScore,
+  type ScorerConfig,
+  type ValidationContext,
+  type SemanticValidationResult,
+  type ResultValidationResult,
 } from "./harness/index.js";

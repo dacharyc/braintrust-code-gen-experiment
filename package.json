@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "compare": "npm run build && export $(xargs < .env) && node dist/compare-approaches.js",
+    "compare": "npm run build && export $(xargs < .env) && node dist/evals/search/create-search-index.js",
     "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
