@@ -8,76 +8,33 @@
  *
  * Usage:
  * ```typescript
- * import { runEvaluation, TaskInput } from "./harness/index.js";
+ * import { runEvaluation } from "./harness/index.js";
+ * import { loadEvalCasesFromFile } from "./utils/loadEvalCases.js";
  *
- * const evalData = [{ input: {...}, expected: {...} }];
+ * const evalCases = loadEvalCasesFromFile("evalCases/search/index-creation.yml");
  * await runEvaluation({
  *   projectName: "My Project",
- *   evalData,
- *   scorer: myScorer,
+ *   evalCases,
  * });
  * ```
  */
 
 import { Eval } from "braintrust";
 import OpenAI from "openai";
-import { fetchDocumentation } from "../utils/fetch-documentation.js";
-import { readSkillFile } from "../utils/read-skill-file.js";
+import { fetchDocumentationWithInfo } from "../utils/fetch-documentation.js";
+import { readSkillFiles } from "../utils/read-skill-file.js";
 import { executeMongoDBCode } from "../utils/code-executor.js";
-
-// =============================================================================
-// SCORING TYPES
-// =============================================================================
-
-/** Score result returned by all scorers */
-export interface CodeScore {
-  name: string;
-  score: number;
-  metadata: {
-    syntaxScore: number;
-    semanticScore: number;
-    executionScore: number;
-    resultScore: number;
-    checks: string[];
-    errors?: string[];
-    executionTime?: number;
-  };
-}
-
-/** Context passed to semantic and result validators */
-export interface ValidationContext {
-  output: string;
-  expected: any;
-  checks: string[];
-  errors: string[];
-}
-
-/** Result from semantic validation */
-export interface SemanticValidationResult {
-  score: number;
-}
-
-/** Result from result validation */
-export interface ResultValidationResult {
-  score: number;
-}
-
-/** Configuration for a topic-specific scorer */
-export interface ScorerConfig {
-  /** Name of the scorer (used in Braintrust dashboard) */
-  name: string;
-  /** Validates semantic correctness based on expected type */
-  validateSemantics: (ctx: ValidationContext) => Promise<SemanticValidationResult>;
-  /** Validates the actual result after execution */
-  validateResult: (ctx: ValidationContext & { executionSucceeded: boolean }) => Promise<ResultValidationResult>;
-}
+import { runCleanup } from "../utils/cleanup.js";
+import { aggregateScores, flattenScores } from "../utils/averageScores.js";
+import { allScorers, type ScorerContext, type ScoreResult } from "../scorers/index.js";
+import type { EvalCase, EvalCaseExpected } from "../schemas/evalCase.js";
 
 // =============================================================================
 // MODEL CONFIGURATION
 // =============================================================================
 
 /** Model used for code generation tasks */
-export const GENERATION_MODEL = process.env.GENERATION_MODEL || "gpt-4o-mini";
+export const GENERATION_MODEL = process.env.GENERATION_MODEL || "gpt-4o";
 
 /** Model used for LLM-based scoring (different from generation to avoid bias) */
 export const SCORING_MODEL = process.env.SCORING_MODEL || "claude-sonnet-4-5-20250929";
@@ -87,11 +44,17 @@ export const SCORING_MODEL = process.env.SCORING_MODEL || "claude-sonnet-4-5-202
 // =============================================================================
 
 /**
+ * API key for AI Proxy LLM access.
+ * Falls back to BRAINTRUST_API_KEY if BRAINTRUST_AI_PROXY_KEY is not set.
+ */
+const AI_PROXY_KEY = process.env.BRAINTRUST_AI_PROXY_KEY || process.env.BRAINTRUST_API_KEY;
+
+/**
  * OpenAI client configured to use Braintrust AI Proxy for code generation.
  */
 export const generationClient = new OpenAI({
   baseURL: "https://api.braintrust.dev/v1/proxy",
-  apiKey: process.env.BRAINTRUST_API_KEY,
+  apiKey: AI_PROXY_KEY,
 });
 
 /**
@@ -99,33 +62,29 @@ export const generationClient = new OpenAI({
  */
 export const scoringClient = new OpenAI({
   baseURL: "https://api.braintrust.dev/v1/proxy",
-  apiKey: process.env.BRAINTRUST_API_KEY,
+  apiKey: AI_PROXY_KEY,
 });
 
 // =============================================================================
 // TYPES
 // =============================================================================
 
-/** Input structure for evaluation task functions */
+/** Input structure for evaluation task functions (derived from EvalCase.input) */
 export interface TaskInput {
   /** The prompt to send to the LLM */
   prompt: string;
   /** URL to fetch documentation from (for "With Docs" approach) */
-  docLink: string;
-  /** Path to skill file (for "With Skill" approach) */
-  skillFile?: string;
+  docLink?: string;
+  /** Path(s) to skill file(s) (for "With Skill" approach) - can be a single path or array */
+  skillFiles?: string | string[];
 }
 
 /** Configuration for running an evaluation */
 export interface EvaluationConfig {
   /** Braintrust project name */
   projectName: string;
-  /** Array of test cases with input and expected output */
-  evalData: Array<{ input: TaskInput; expected: any }>;
-  /** Scorer function to evaluate generated code */
-  scorer: (args: { input: any; output: string; expected?: any }) => Promise<any>;
-  /** Optional cleanup function to run between evaluations */
-  cleanup?: () => Promise<void>;
+  /** Array of eval cases loaded from YAML */
+  evalCases: EvalCase[];
 }
 
 // =============================================================================
@@ -138,9 +97,46 @@ Requirements:
 - Use CommonJS syntax (require, not import)
 - Use async/await
 - Include error handling
+- Get the MongoDB connection string from the MONGODB_URI environment variable (process.env.MONGODB_URI)
+- Do NOT hardcode connection strings like "mongodb://localhost:27017"
 - Return only executable code
 - Do NOT wrap code in markdown code blocks or backticks
 - No explanations or comments outside the code`;
+
+/**
+ * Strip markdown code blocks from LLM output.
+ * LLMs sometimes wrap code in \`\`\`javascript ... \`\`\` despite being told not to.
+ * Also handles cases where there's explanatory text before/after the code block.
+ */
+function stripMarkdownCodeBlocks(code: string): string {
+  const trimmed = code.trim();
+
+  // Try to extract code from a markdown code block anywhere in the output
+  // This handles cases where there's text before or after the code block
+  const codeBlockRegex = /```(?:\w+)?\s*\n([\s\S]*?)\n```/;
+  const match = trimmed.match(codeBlockRegex);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+
+  // Handle case where the entire output is wrapped in code blocks (no newline after language)
+  const fullWrapRegex = /^```(?:\w+)?\s*([\s\S]*?)```$/;
+  const fullMatch = trimmed.match(fullWrapRegex);
+  if (fullMatch && fullMatch[1]) {
+    return fullMatch[1].trim();
+  }
+
+
+
+  // Handle partial wrapping - just strip the markers
+  let cleaned = trimmed;
+  // Remove leading ``` with optional language identifier
+  cleaned = cleaned.replace(/^```(?:\w+)?\s*\n?/, '');
+  // Remove trailing ```
+  cleaned = cleaned.replace(/\n?```\s*$/, '');
+
+  return cleaned.trim();
+}
 
 // =============================================================================
 // TASK FUNCTIONS
@@ -164,7 +160,8 @@ export async function taskBaseline(input: TaskInput, hooks?: any): Promise<strin
     ],
     temperature: 0.2,
   });
-  return response.choices[0]?.message?.content || "";
+  const rawOutput = response.choices[0]?.message?.content || "";
+  return stripMarkdownCodeBlocks(rawOutput);
 }
 
 /**
@@ -173,18 +170,32 @@ export async function taskBaseline(input: TaskInput, hooks?: any): Promise<strin
 export async function taskWithDocs(input: TaskInput, hooks?: any): Promise<string> {
   console.log(`[WithDocs] Generating code with ${GENERATION_MODEL}...`);
 
-  const docContent = await fetchDocumentation(input.docLink);
+  if (!input.docLink) {
+    // Fall back to baseline if no docLink provided
+    return taskBaseline(input, hooks);
+  }
+
+  const docResult = await fetchDocumentationWithInfo(input.docLink);
 
   const enhancedPrompt = `${input.prompt}
 
 Use the following MongoDB documentation as reference:
 
-${docContent}`;
+${docResult.content}`;
 
   if (hooks) {
     hooks.metadata.actualPrompt = enhancedPrompt;
-    hooks.metadata.docContentLength = docContent.length;
+    hooks.metadata.docContentLength = docResult.content.length;
+    hooks.metadata.docOriginalLength = docResult.originalLength;
+    hooks.metadata.docWasTruncated = docResult.wasTruncated;
+    hooks.metadata.docCharsTruncated = docResult.charsTruncated;
+    hooks.metadata.docUrl = docResult.url;
     hooks.metadata.generationModel = GENERATION_MODEL;
+
+    // Flag for easy filtering in Braintrust when docs were truncated
+    if (docResult.wasTruncated) {
+      hooks.metadata.docsTruncationWarning = `Documentation from ${docResult.url} was truncated: ${docResult.originalLength} -> ${docResult.content.length} chars (${docResult.charsTruncated} chars removed). Consider splitting or summarizing this docs page.`;
+    }
   }
 
   const response = await generationClient.chat.completions.create({
@@ -195,7 +206,8 @@ ${docContent}`;
     ],
     temperature: 0.2,
   });
-  return response.choices[0]?.message?.content || "";
+  const rawOutput = response.choices[0]?.message?.content || "";
+  return stripMarkdownCodeBlocks(rawOutput);
 }
 
 /**
@@ -204,17 +216,27 @@ ${docContent}`;
 export async function taskWithSkill(input: TaskInput, hooks?: any): Promise<string> {
   console.log(`[WithSkill] Generating code with ${GENERATION_MODEL}...`);
 
-  if (!input.skillFile) {
-    throw new Error("skillFile is required for taskWithSkill");
+  if (!input.skillFiles) {
+    throw new Error("skillFiles is required for taskWithSkill");
   }
-  const skillContent = await readSkillFile(input.skillFile);
+  const skillContent = await readSkillFiles(input.skillFiles);
 
   const systemPrompt = `You are a MongoDB expert assistant. Generate Node.js code using the MongoDB driver.
+
+Requirements:
+- Use CommonJS syntax (require, not import)
+- Use async/await
+- Include error handling
+- Get the MongoDB connection string from the MONGODB_URI environment variable (process.env.MONGODB_URI)
+- Do NOT hardcode connection strings like "mongodb://localhost:27017"
+- Return only executable code
+- Do NOT wrap code in markdown code blocks or backticks
+- No explanations or comments outside the code
 
 ${skillContent}`;
 
   if (hooks) {
-    hooks.metadata.skillFile = input.skillFile;
+    hooks.metadata.skillFiles = input.skillFiles;
     hooks.metadata.skillContent = skillContent;
     hooks.metadata.userPrompt = input.prompt;
     hooks.metadata.generationModel = GENERATION_MODEL;
@@ -228,7 +250,8 @@ ${skillContent}`;
     ],
     temperature: 0.2,
   });
-  return response.choices[0]?.message?.content || "";
+  const rawOutput = response.choices[0]?.message?.content || "";
+  return stripMarkdownCodeBlocks(rawOutput);
 }
 
 // =============================================================================
@@ -236,24 +259,107 @@ ${skillContent}`;
 // =============================================================================
 
 /**
+ * Convert an EvalCase to the format expected by Braintrust.
+ */
+function evalCaseToData(evalCase: EvalCase): { input: TaskInput; expected: EvalCaseExpected } {
+  return {
+    input: {
+      prompt: evalCase.input.prompt,
+      docLink: evalCase.input.docLink,
+      skillFiles: evalCase.input.skillFiles,
+    },
+    expected: evalCase.expected,
+  };
+}
+
+/**
+ * Create a scorer function that runs all scorers and returns all scores.
+ *
+ * This function:
+ * 1. Executes the code (if execution assertions are specified)
+ * 2. Runs all scorers with the execution result
+ * 3. Aggregates scores into categories and compound
+ * 4. Returns all scores for Braintrust
+ */
+function createEvalScorer(_evalCase: EvalCase) {
+  return async function scorer(args: {
+    input: TaskInput;
+    output: string;
+    expected: EvalCaseExpected;
+  }): Promise<ScoreResult[]> {
+    const { output, expected } = args;
+
+    // Execute code if execution or result assertions are specified
+    let executionResult: ScorerContext["executionResult"];
+    if (expected.execution?.shouldSucceed || expected.result) {
+      try {
+        executionResult = await executeMongoDBCode(output);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        executionResult = { success: false, error: message };
+      }
+    }
+
+    // Build scorer context
+    const context: ScorerContext = {
+      output,
+      expected,
+      executionResult,
+    };
+
+    // Run all scorers
+    const scorerResults: Array<ScoreResult | ScoreResult[]> = [];
+    for (const scorer of allScorers) {
+      const result = await scorer(context);
+      scorerResults.push(result);
+    }
+
+    // Flatten results (some scorers return arrays)
+    const flatScores = flattenScores(scorerResults);
+
+    // Aggregate into categories and compound
+    const aggregated = aggregateScores(flatScores);
+
+    // Return all scores: individual + categories + compound
+    return [
+      ...aggregated.individual,
+      ...aggregated.categories,
+      aggregated.compound,
+    ];
+  };
+}
+
+/**
  * Run a complete evaluation comparing all three approaches.
  * Executes sequentially with cleanup between each to avoid resource conflicts.
  */
 export async function runEvaluation(config: EvaluationConfig): Promise<void> {
-  const { projectName, evalData, scorer, cleanup } = config;
+  const { projectName, evalCases } = config;
 
-  console.log(`\n🚀 Running Evaluation: ${projectName}\n`);
+  console.log(`\nRunning Evaluation: ${projectName}\n`);
   console.log("Results will be logged to the Braintrust dashboard.");
   console.log("View your experiments at: https://www.braintrust.dev\n");
-  console.log(`📊 Model Configuration:`);
+  console.log(`Model Configuration:`);
   console.log(`   Generation: ${GENERATION_MODEL}`);
   console.log(`   Scoring:    ${SCORING_MODEL}\n`);
 
+  // Convert eval cases to Braintrust data format
+  const evalData = evalCases.map(evalCaseToData);
+
+  // Create cleanup function for all eval cases
+  const cleanupAll = async () => {
+    for (const evalCase of evalCases) {
+      await runCleanup(evalCase.cleanup);
+    }
+  };
+
   // Initial cleanup
-  if (cleanup) {
-    console.log("🧹 Running initial cleanup...\n");
-    await cleanup();
-  }
+  console.log("Running initial cleanup...\n");
+  await cleanupAll();
+
+  // Create scorers for each eval case
+  // Note: Braintrust expects a single scorer, but we return an array of scores
+  const scorers = evalCases.map((evalCase) => createEvalScorer(evalCase));
 
   console.log("--- Evaluation 1: Baseline ---");
   await Eval(projectName, {
@@ -261,10 +367,10 @@ export async function runEvaluation(config: EvaluationConfig): Promise<void> {
     update: true,
     data: () => evalData,
     task: async (input: TaskInput, hooks) => taskBaseline(input, hooks),
-    scores: [scorer],
+    scores: scorers,
   });
 
-  if (cleanup) await cleanup();
+  await cleanupAll();
 
   console.log("\n--- Evaluation 2: With Documentation ---");
   await Eval(projectName, {
@@ -272,10 +378,10 @@ export async function runEvaluation(config: EvaluationConfig): Promise<void> {
     update: true,
     data: () => evalData,
     task: async (input: TaskInput, hooks) => taskWithDocs(input, hooks),
-    scores: [scorer],
+    scores: scorers,
   });
 
-  if (cleanup) await cleanup();
+  await cleanupAll();
 
   console.log("\n--- Evaluation 3: With Skill ---");
   await Eval(projectName, {
@@ -283,117 +389,11 @@ export async function runEvaluation(config: EvaluationConfig): Promise<void> {
     update: true,
     data: () => evalData,
     task: async (input: TaskInput, hooks) => taskWithSkill(input, hooks),
-    scores: [scorer],
+    scores: scorers,
   });
 
   // Final cleanup
-  if (cleanup) await cleanup();
+  await cleanupAll();
 
-  console.log("\n✅ All evaluations complete!");
-}
-
-// =============================================================================
-// SCORER FACTORY
-// =============================================================================
-
-/**
- * Creates a scorer function with reusable syntax and execution validation.
- * Topic-specific scorers provide semantic and result validation.
- *
- * Scoring breakdown:
- * - Syntax: 25% (async/await, MongoDB imports)
- * - Semantic: 35% (topic-specific API usage)
- * - Execution: 20% (code runs without errors)
- * - Result: 20% (expected outcome achieved)
- */
-export function createScorer(config: ScorerConfig) {
-  return async function scorer(args: {
-    input: any;
-    output: string;
-    expected?: any;
-  }): Promise<CodeScore> {
-    const { output, expected } = args;
-    const checks: string[] = [];
-    const errors: string[] = [];
-
-    let syntaxScore = 0;
-    let semanticScore = 0;
-    let executionScore = 0;
-    let resultScore = 0;
-
-    // 1. SYNTAX VALIDATION (25% of score) - Reusable
-    if (!output || output.trim().length === 0) {
-      errors.push("No code generated");
-      return {
-        name: config.name,
-        score: 0,
-        metadata: { syntaxScore, semanticScore, executionScore, resultScore, checks, errors },
-      };
-    }
-
-    if (output.includes("async") || output.includes("await") || output.includes("function")) {
-      syntaxScore += 0.1;
-      checks.push("✓ Contains async/await or function syntax");
-    }
-
-    if (output.includes("MongoClient") || output.includes("mongodb")) {
-      syntaxScore += 0.15;
-      checks.push("✓ Imports MongoDB driver");
-    } else {
-      errors.push("Missing MongoDB driver import");
-    }
-
-    // 2. SEMANTIC VALIDATION (35% of score) - Topic-specific
-    const semanticResult = await config.validateSemantics({
-      output,
-      expected,
-      checks,
-      errors,
-    });
-    semanticScore = semanticResult.score;
-
-    // 3. EXECUTION VALIDATION (20% of score) - Reusable
-    let executionSucceeded = false;
-    if (process.env.MONGODB_URI) {
-      try {
-        const execResult = await executeMongoDBCode(output);
-        if (execResult.success) {
-          executionScore = 0.2;
-          executionSucceeded = true;
-          checks.push("✓ Code executes without errors");
-        } else {
-          errors.push(`Execution error: ${execResult.error}`);
-        }
-      } catch (error: any) {
-        errors.push(`Execution failed: ${error.message}`);
-      }
-    } else {
-      checks.push("⚠ Skipping execution (no MONGODB_URI set)");
-    }
-
-    // 4. RESULT VALIDATION (20% of score) - Topic-specific
-    const resultResult = await config.validateResult({
-      output,
-      expected,
-      checks,
-      errors,
-      executionSucceeded,
-    });
-    resultScore = resultResult.score;
-
-    const totalScore = syntaxScore + semanticScore + executionScore + resultScore;
-
-    return {
-      name: config.name,
-      score: Math.min(totalScore, 1.0),
-      metadata: {
-        syntaxScore,
-        semanticScore,
-        executionScore,
-        resultScore,
-        checks,
-        errors: errors.length > 0 ? errors : undefined,
-      },
-    };
-  };
+  console.log("\nAll evaluations complete!");
 }

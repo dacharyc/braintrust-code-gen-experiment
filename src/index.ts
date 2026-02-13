@@ -16,7 +16,6 @@
 // Re-export harness for use in other evaluation scripts
 export {
   runEvaluation,
-  createScorer,
   taskBaseline,
   taskWithDocs,
   taskWithSkill,
@@ -26,9 +25,35 @@ export {
   SCORING_MODEL,
   type TaskInput,
   type EvaluationConfig,
-  type CodeScore,
-  type ScorerConfig,
-  type ValidationContext,
-  type SemanticValidationResult,
-  type ResultValidationResult,
 } from "./harness/index.js";
+
+// Re-export schemas
+export {
+  EvalCaseSchema,
+  EvalCasesSchema,
+  type EvalCase,
+  type EvalCaseInput,
+  type EvalCaseExpected,
+  type EvalCaseCleanup,
+  type Pattern,
+} from "./schemas/evalCase.js";
+
+// Re-export scorers
+export {
+  allScorers,
+  isValidJS,
+  hasAsyncAwait,
+  mustContain,
+  mustNotContain,
+  succeeds,
+  searchIndexExists,
+  type ScoreResult,
+  type ScorerContext,
+  type CodeGenScorer,
+  type ScoreCategory,
+} from "./scorers/index.js";
+
+// Re-export utilities
+export { loadEvalCasesFromFile, loadEvalCasesFromDirectory, filterByTags } from "./utils/loadEvalCases.js";
+export { aggregateScores, flattenScores, type AggregatedScores } from "./utils/averageScores.js";
+export { runCleanup, dropSearchIndex } from "./utils/cleanup.js";

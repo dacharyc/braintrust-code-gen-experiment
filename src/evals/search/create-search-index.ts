@@ -7,32 +7,16 @@
  * Usage: npm run compare
  */
 
-import { runEvaluation, type TaskInput } from "../../harness/index.js";
-import { searchScorer } from "../../scorers/search-scorer.js";
-import { cleanupSearchIndexes } from "../../utils/code-executor.js";
+import { runEvaluation } from "../../harness/index.js";
+import { loadEvalCasesFromFile } from "../../utils/loadEvalCases.js";
 
-// Test cases for MongoDB Atlas Search code generation
-const evalData: Array<{ input: TaskInput; expected: any }> = [
-  {
-    input: {
-      prompt: "Write Node.js code to create a search index on the movies collection in sample_mflix with dynamic mapping",
-      docLink: "https://www.mongodb.com/docs/atlas/atlas-search/manage-indexes.md",
-      skillFile: "src/skills/search.md",
-    },
-    expected: {
-      type: "createSearchIndex",
-      database: "sample_mflix",
-      collection: "movies",
-      indexName: "default",
-      hasDynamicMapping: true,
-    },
-  },
-];
+// Load eval cases from YAML
+const evalCases = loadEvalCasesFromFile("evalCases/search/index-creation.yml");
+
+console.log(`Loaded ${evalCases.length} eval case(s)`);
 
 // Run the evaluation
 runEvaluation({
-  projectName: "MongoDB Atlas Search",
-  evalData,
-  scorer: searchScorer,
-  cleanup: cleanupSearchIndexes,
+  projectName: "Code Gen Experiment",
+  evalCases,
 }).catch(console.error);

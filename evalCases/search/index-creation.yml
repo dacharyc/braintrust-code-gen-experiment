@@ -1,0 +1,47 @@
+# Atlas Search Index Creation Eval Cases
+# Tests LLM ability to generate code for creating search indexes
+
+- name: Create search index with dynamic mapping
+  tags: [search, index, dynamic-mapping]
+
+  input:
+    prompt: "Write Node.js code to create a search index on the movies collection in sample_mflix with dynamic mapping"
+    docLink: https://www.mongodb.com/docs/atlas/atlas-search/manage-indexes.md
+    skillFiles:
+      - /Users/dachary.carey/temp/mdb-skill-builder/ext-source/skills/ai-search/SKILL.md
+      - /Users/dachary.carey/temp/mdb-skill-builder/ext-source/skills/ai-search/references/manage-indexes.md
+
+  expected:
+    syntax:
+      isValidJS: true
+      hasAsyncAwait: true
+
+    semantic:
+      mustContain:
+        - pattern: ".createSearchIndex("
+          name: UsesCreateSearchIndex
+        - pattern: sample_mflix
+          name: CorrectDatabase
+        - pattern: movies
+          name: CorrectCollection
+      mustNotContain:
+        - pattern: ".createIndex("
+          name: NotCreateIndex
+
+    execution:
+      shouldSucceed: true
+
+    result:
+      searchIndexExists:
+        database: sample_mflix
+        collection: movies
+        indexName: default
+        config:
+          latestDefinition.mappings.dynamic: true
+
+  cleanup:
+    dropSearchIndex:
+      database: sample_mflix
+      collection: movies
+      indexName: default
+
